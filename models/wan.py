@@ -514,6 +514,7 @@ class WanPipeline(BasePipeline):
 
     def get_call_vae_fn(self, vae_and_clip):
         def fn(tensor):
+            tensor,ref  = tensor
             vae = vae_and_clip.vae
             p = next(vae.parameters())
             tensor = tensor.to(p.device, p.dtype)
@@ -522,8 +523,8 @@ class WanPipeline(BasePipeline):
             clip = vae_and_clip.clip
             if clip is not None:
                 assert tensor.ndim == 5, f'i2v/flf2v must train on videos, got tensor with shape {tensor.shape}'
-                first_frame = tensor[:, :, 0:1, ...].clone()
-                clip_context = self.clip.visual(first_frame.to(p.device, p.dtype))
+                # first_frame = tensor[:, :, 0:1, ...].clone()
+                clip_context = self.clip.visual(ref[:,:,None ,...].to(p.device, p.dtype))
 
                 if self.flf2v:
                     last_frame = tensor[:, :, -1:, ...].clone()

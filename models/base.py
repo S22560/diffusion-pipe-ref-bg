@@ -14,6 +14,21 @@ import imageio
 from utils.common import is_main_process, VIDEO_EXTENSIONS, round_to_nearest_multiple, round_down_to_multiple
 
 
+def center_crop_square(img):
+    c = min(img.width, img.height)
+    
+    center_x = img.width // 2
+    center_y = img.height // 2
+    
+    left = center_x - c // 2
+    top = center_y - c // 2
+    right = left + c
+    bottom = top + c
+    
+    cropped_img = img.crop((left, top, right, bottom))
+    return cropped_img
+
+
 def make_contiguous(*tensors):
     return tuple(x.contiguous() for x in tensors)
 
@@ -72,7 +87,7 @@ class PreprocessMediaFile:
         if self.support_video:
             assert self.framerate
 
-    def __call__(self, filepath, mask_filepath, size_bucket=None):
+    def __call__(self, filepath, mask_filepath, ref_filepath=None, size_bucket=None):
         is_video = (Path(filepath).suffix in VIDEO_EXTENSIONS)
         if is_video:
             assert self.support_video
@@ -111,6 +126,12 @@ class PreprocessMediaFile:
             mask = torchvision.transforms.functional.to_tensor(mask_img)[0].to(torch.float16)  # use first channel
         else:
             mask = None
+        if ref_filepath:
+            ref_img = Image.open(ref_filepath).convert('RGB')
+            ref_img = center_crop_square(ref_img).resize((224,224))
+            ref = 2*torchvision.transforms.functional.to_tensor(ref_img).to(torch.float16)  - 1 # use first channel
+        else:
+            ref = None
 
         resized_video = torch.empty((num_frames, 3, height_rounded, width_rounded))
         for i, frame in enumerate(video):
@@ -120,15 +141,15 @@ class PreprocessMediaFile:
             resized_video[i, ...] = self.pil_to_tensor(cropped_image)
 
         if not self.support_video:
-            return [(resized_video.squeeze(0), mask)]
+            return [(resized_video.squeeze(0), mask, ref)]
 
         # (num_frames, channels, height, width) -> (channels, num_frames, height, width)
         resized_video = torch.permute(resized_video, (1, 0, 2, 3))
         if not is_video:
-            return [(resized_video, mask)]
+            return [(resized_video, mask, ref)]
         else:
             videos = extract_clips(resized_video, frames_rounded, self.video_clip_mode)
-            return [(video, mask) for video in videos]
+            return [(video, mask, ref) for video in videos]
 
 
 class BasePipeline:

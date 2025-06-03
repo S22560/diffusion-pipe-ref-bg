@@ -290,6 +290,7 @@ class DirectoryDataset:
         self.shuffle_delimiter = directory_config.get('cache_shuffle_delimiter', dataset_config.get('cache_shuffle_delimiter', ", "))
         self.path = Path(self.directory_config['path'])
         self.mask_path = Path(self.directory_config['mask_path']) if 'mask_path' in self.directory_config else None
+        self.ref_path = Path(self.directory_config['ref_path']) if 'ref_path' in self.directory_config else None
         # For testing. Default if a mask is missing.
         self.default_mask_file = Path(self.directory_config['default_mask_file']) if 'default_mask_file' in self.directory_config else None
         self.cache_dir = self.path / 'cache' / self.model_name
@@ -336,10 +337,12 @@ class DirectoryDataset:
 
         # Mask can have any extension, it just needs to have the same stem as the image.
         mask_file_stems = {path.stem: path for path in self.mask_path.glob('*') if path.is_file()} if self.mask_path is not None else {}
-
+        ref_file_stems = {path.stem: path for path in self.ref_path.glob('*') if path.is_file()} if self.ref_path is not None else {}
+        print(ref_file_stems)
         image_files = []
         caption_files = []
         mask_files = []
+        ref_files = []
         for file in files:
             if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json':
                 continue
@@ -349,6 +352,10 @@ class DirectoryDataset:
                 caption_file = ''
             image_files.append(str(image_file))
             caption_files.append(str(caption_file))
+            if image_file.stem in ref_file_stems:
+                ref_files.append(str(ref_file_stems[image_file.stem]))
+            else:
+                raise Exception("no reference image found")
             if image_file.stem in mask_file_stems:
                 mask_files.append(str(mask_file_stems[image_file.stem]))
             elif self.default_mask_file is not None:
@@ -359,7 +366,7 @@ class DirectoryDataset:
                 mask_files.append(None)
         assert len(image_files) > 0, f'Directory {self.path} had no images/videos!'
 
-        metadata_dataset = datasets.Dataset.from_dict({'image_file': image_files, 'caption_file': caption_files, 'mask_file': mask_files})
+        metadata_dataset = datasets.Dataset.from_dict({'image_file': image_files, 'caption_file': caption_files, 'mask_file': mask_files, "ref_file":ref_files})
         # Shuffle the data. Use a deterministic seed, so the dataset is identical on all processes.
         # Seed is based on the hash of the directory path, so that if directories have the same set of images, they are shuffled differently.
         seed = int(hashlib.md5(str.encode(str(self.path))).hexdigest(), 16) % int(1e9)
@@ -448,7 +455,7 @@ class DirectoryDataset:
             if self.directory_config['shuffle_tags'] and self.shuffle == 0: # backwards compatibility
                 self.shuffle = 1
             captions = shuffle_captions(captions, self.shuffle, self.shuffle_delimiter, self.directory_config['caption_prefix'])
-            empty_return = {'image_file': [], 'mask_file': [], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': []}
+            empty_return = {'image_file': [], 'mask_file': [], 'ref_file':[], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': []}
 
             image_file = Path(image_file)
             if image_file.suffix == '.webp':
@@ -495,6 +502,7 @@ class DirectoryDataset:
             return {
                 'image_file': [str(image_file)],
                 'mask_file': [example['mask_file'][0]],
+                'ref_file': [example['ref_file'][0]],
                 'caption': [captions],
                 'ar_bucket': [ar_bucket],
                 'size_bucket': [size_bucket],
@@ -675,6 +683,7 @@ class Dataset:
                 ret[key] = [example[key] for example in examples]
         # Only some items in the batch might have valid mask.
         masks = [example['mask'] for example in examples]
+        refs = [example['ref'] for example in examples]
         # See if we have any valid masks. If we do, they should all have the same shape.
         shape = None
         for mask in masks:
@@ -690,6 +699,7 @@ class Dataset:
         else:
             # We can leave the batch mask as None and the loss_fn will skip masking entirely.
             ret['mask'] = None
+        ret["ref"] = torch.stack(refs)
         return ret
 
     def cache_metadata(self, regenerate_cache=False):
@@ -723,23 +733,25 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         tensors_and_masks = []
         image_files = []
         captions = []
-        for path, mask_path, size_bucket, caption in zip(example['image_file'], example['mask_file'], example['size_bucket'], example['caption']):
+        for path, mask_path, ref_path, size_bucket, caption in zip(example['image_file'], example['mask_file'], example['ref_file'], example['size_bucket'], example['caption']):
             assert size_bucket == first_size_bucket
-            items = preprocess_media_file_fn(path, mask_path, size_bucket)
+            items = preprocess_media_file_fn(path, mask_path, ref_path, size_bucket)
             tensors_and_masks.extend(items)
             image_files.extend([path] * len(items))
             captions.extend([caption] * len(items))
 
         if len(tensors_and_masks) == 0:
-            return {'latents': [], 'mask': [], 'image_file': [], 'caption': []}
+            return {'latents': [], 'mask': [], 'image_file': [], 'ref_file':[], 'caption': []}
 
         caching_batch_size = len(example['image_file'])
         results = defaultdict(list)
         for i in range(0, len(tensors_and_masks), caching_batch_size):
             tensors = [t[0] for t in tensors_and_masks[i:i+caching_batch_size]]
+            refs = [t[2] for t in tensors_and_masks[i:i+caching_batch_size]]
             batched = torch.stack(tensors)
+            batched_ref = torch.stack(refs)
             parent_conn, child_conn = mp.Pipe(duplex=False)
-            queue.put((0, batched, child_conn))
+            queue.put((0, (batched,batched_ref), child_conn))
             result = parent_conn.recv()  # dict
             for k, v in result.items():
                 results[k].append(v)
