@@ -760,6 +760,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
             results[k] = torch.cat(v)
         results['image_file'] = image_files
         results['mask'] = [t[1] for t in tensors_and_masks]
+        results['ref'] = [t[2] for t in tensors_and_masks]
         results['caption'] = captions
         return results
 
